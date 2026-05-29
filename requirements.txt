@@ -1,0 +1,10 @@
+datasets>=2.14.0,<3.0.0
+google-genai>=1.0.0
+ollama>=0.2.0
+pandas>=2.1.0
+matplotlib>=3.8.0
+numpy>=1.26.0
+codecarbon>=2.4.0
+ecologits>=0.5.0
+python-dotenv>=1.0.0
+pytest>=8.0.0

@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+results/*.csv
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+codecarbon_results/
+emissions.csv
