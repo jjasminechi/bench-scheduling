@@ -1,10 +1,19 @@
+# Benchmark data (hellaswag, piqa, arc_easy from HuggingFace)
 datasets>=2.14.0,<3.0.0
-google-genai>=1.0.0
-ollama>=0.2.0
+
+# Models
+google-genai>=1.0.0     # Gemini API (reads GEMINI_API_KEY from env)
+ollama>=0.2.0           # local models via Ollama daemon
+
+# Data / compute
 pandas>=2.1.0
-matplotlib>=3.8.0
 numpy>=1.26.0
-codecarbon>=2.4.0
-ecologits>=0.5.0
+
+# Plots
+matplotlib>=3.8.0
+
+# Env
 python-dotenv>=1.0.0
+
+# Dev
 pytest>=8.0.0

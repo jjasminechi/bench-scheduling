@@ -1,256 +1,314 @@
-"""
-Eval harness: runs each model over the eval set and writes a results CSV.
-
-Energy / CO2 tracking:
-- Local inference: CodeCarbon EmissionsTracker wraps each Ollama call.
-- Cloud inference: EcoLogits patches google-genai at import time (via models.py)
-  and adds .impacts.gwp to each response; harness reads co2_kg off ModelResponse.
-"""
-
 from __future__ import annotations
 
-import json
+import concurrent.futures
+import contextlib
+import csv
+import math
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+from .benchmarks import parse_answer, score_answer
+from .models import MODEL_PARAMS_B, GeminiModel, OllamaModel
+from .power import check_power_available, measure_power
 
-from .models import GeminiModel, OllamaModel, get_cloud_model, get_local_models, MODEL_PARAM_B
-from .scoring import extract_json, score_prediction
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-HERE = Path(__file__).parent
-REPO_ROOT = HERE.parent
-EVAL_PATH = REPO_ROOT / "data" / "eval_set.json"
-RESULTS_DIR = REPO_ROOT / "results"
+RESULTS_DIR = Path(__file__).parent.parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+RESULTS_CSV  = RESULTS_DIR / "results.csv"
+
+SYSTEM_PROMPT = (
+    "You are answering multiple-choice questions. "
+    "Follow the instructions in each question exactly."
+)
+
+CSV_FIELDS = [
+    "model", "model_type", "model_params_b", "benchmark", "example_id",
+    "gold", "predicted", "correct", "latency_s",
+    "energy_j", "energy_kwh", "energy_method",
+    "emissions_g",
+    "cost_usd", "prompt_tokens", "completion_tokens",
+    "is_mock", "error",
+]
 
 
 # ---------------------------------------------------------------------------
-# Energy helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _codecarbon_tracker(model_tag: str):
-    """Return a CodeCarbon tracker or a no-op context manager."""
+def _electricity_rate() -> float:
     try:
-        from codecarbon import EmissionsTracker  # type: ignore
-        return EmissionsTracker(
-            project_name=f"bench-{model_tag}",
-            output_dir=str(RESULTS_DIR),
-            log_level="error",
-            save_to_file=False,
-        )
-    except ImportError:
-        from contextlib import nullcontext
-        return nullcontext()
+        return float(os.getenv("ELECTRICITY_RATE_USD_PER_KWH", "0.12"))
+    except ValueError:
+        return 0.12
 
+
+def _nan() -> float:
+    return float("nan")
 
 
 # ---------------------------------------------------------------------------
-# Per-call runner
+# Local model runner
 # ---------------------------------------------------------------------------
 
-def _run_one_local(
+def run_local_benchmark(
     model: OllamaModel,
-    example: dict[str, Any],
-    use_codecarbon: bool = True,
-) -> dict[str, Any]:
-    user_text = example["input"]
-    example_id = example["id"]
-    gold = example["expected"]
+    benchmark: str,
+    examples: list[dict],
+    use_power: bool = True,
+    verbose: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Run one local model on all examples for one benchmark.
+    One powermetrics session wraps the full loop; latency is timed per example.
+    """
+    rate = _electricity_rate()
+    meter = measure_power() if use_power else contextlib.nullcontext()
 
-    co2_kg: float = 0.0
+    per_ex: list[dict] = []
 
-    if use_codecarbon:
-        tracker = _codecarbon_tracker(model.model_tag)
-        try:
-            tracker.start()  # type: ignore[union-attr]
-        except Exception:
-            tracker = None
+    with meter:
+        for i, ex in enumerate(examples):
+            t0    = time.perf_counter()
+            resp  = model.call(ex["prompt"], system=SYSTEM_PROMPT)
+            lat   = time.perf_counter() - t0
+
+            pred    = parse_answer(resp.raw_text, benchmark)
+            correct = score_answer(pred, ex["gold"])
+
+            per_ex.append({
+                "predicted": pred,
+                "correct":   correct,
+                "latency_s": lat,
+                "error":     resp.error or "",
+            })
+
+            if verbose:
+                status = "✓" if correct else "✗"
+                print(
+                    f"    [{i+1:3d}/{len(examples)}] {ex['id']:20s} "
+                    f"gold={ex['gold']} pred={str(pred):4s} {status} {lat:.2f}s",
+                    flush=True,
+                )
+
+    n = len(examples)
+    if use_power and hasattr(meter, "joules") and meter.joules > 0:
+        energy_j    = meter.joules / n
+        energy_kwh  = meter.kwh()  / n
+        emissions_g = getattr(meter, "emissions_g", _nan()) / n
+        method      = getattr(meter, "method", "CodeCarbon")
+        cost_usd    = energy_kwh * rate
     else:
-        tracker = None
+        energy_j    = _nan()
+        energy_kwh  = _nan()
+        emissions_g = _nan()
+        method      = "none"
+        cost_usd    = _nan()
 
-    response = model.call(user_text)
-
-    if tracker is not None:
-        try:
-            emissions = tracker.stop()  # type: ignore[union-attr]
-            co2_kg = float(emissions) if emissions else 0.0
-        except Exception:
-            co2_kg = 0.0
-
-    pred_dict = extract_json(response.raw_text)
-    scores = score_prediction(pred_dict, gold)
-
-    return {
-        "example_id": example_id,
-        "model": model.name,
-        "model_params_b": MODEL_PARAM_B.get(model.model_tag, None),
-        "model_type": "local",
-        "input": user_text,
-        "intent_gold": gold["intent"],
-        "raw_output": response.raw_text[:500],
-        "parse_ok": scores["parse_ok"],
-        "score_overall": scores["overall"],
-        "score_intent": scores["intent"],
-        "score_title": scores["title"],
-        "score_start_time": scores["start_time"],
-        "score_end_time": scores["end_time"],
-        "score_duration": scores["duration_minutes"],
-        "score_attendees": scores["attendees"],
-        "score_recurrence": scores["recurrence"],
-        "score_priority": scores["priority"],
-        "latency_s": response.latency_s,
-        "co2_kg": co2_kg,
-        "cost_usd": 0.0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "is_mock": False,
-        "error": response.error or "",
-    }
-
-
-def _run_one_cloud(
-    model: GeminiModel,
-    example: dict[str, Any],
-) -> dict[str, Any]:
-    user_text = example["input"]
-    example_id = example["id"]
-    gold = example["expected"]
-
-    response = model.call(user_text)
-
-    co2_kg = response.co2_kg
-    cost_usd = model.estimate_cost_usd(response.prompt_tokens, response.completion_tokens)
-
-    pred_dict = extract_json(response.raw_text)
-    scores = score_prediction(pred_dict, gold)
-
-    return {
-        "example_id": example_id,
-        "model": model.name,
-        "model_params_b": MODEL_PARAM_B.get(model.name, 200.0),
-        "model_type": "cloud",
-        "input": user_text,
-        "intent_gold": gold["intent"],
-        "raw_output": response.raw_text[:500],
-        "parse_ok": scores["parse_ok"],
-        "score_overall": scores["overall"],
-        "score_intent": scores["intent"],
-        "score_title": scores["title"],
-        "score_start_time": scores["start_time"],
-        "score_end_time": scores["end_time"],
-        "score_duration": scores["duration_minutes"],
-        "score_attendees": scores["attendees"],
-        "score_recurrence": scores["recurrence"],
-        "score_priority": scores["priority"],
-        "latency_s": response.latency_s,
-        "co2_kg": co2_kg,
-        "cost_usd": cost_usd,
-        "prompt_tokens": response.prompt_tokens,
-        "completion_tokens": response.completion_tokens,
-        "is_mock": response.is_mock,
-        "error": response.error or "",
-    }
+    rows = []
+    for ex, r in zip(examples, per_ex):
+        rows.append({
+            "model":            model.name,
+            "model_type":       "local",
+            "model_params_b":   MODEL_PARAMS_B.get(model.model_tag),
+            "benchmark":        benchmark,
+            "example_id":       ex["id"],
+            "gold":             ex["gold"],
+            "predicted":        r["predicted"],
+            "correct":          r["correct"],
+            "latency_s":        r["latency_s"],
+            "energy_j":         energy_j,
+            "energy_kwh":       energy_kwh,
+            "energy_method":    method,
+            "emissions_g":      emissions_g,
+            "cost_usd":         cost_usd,
+            "prompt_tokens":    0,
+            "completion_tokens":0,
+            "is_mock":          False,
+            "error":            r["error"],
+        })
+    return rows
 
 
 # ---------------------------------------------------------------------------
-# Main harness entry point
+# Cloud model runner
+# ---------------------------------------------------------------------------
+
+def run_cloud_benchmark(
+    model: GeminiModel,
+    benchmark: str,
+    examples: list[dict],
+    verbose: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Run the cloud model on one benchmark. Measures latency and token counts
+    per example. Energy is not reported (not externally accessible).
+    """
+    def _evaluate(i_ex):
+        i, ex = i_ex
+        resp    = model.call(ex["prompt"], system=SYSTEM_PROMPT)
+        pred    = parse_answer(resp.raw_text, benchmark)
+        correct = score_answer(pred, ex["gold"])
+        cost    = model.cost_usd(resp.prompt_tokens, resp.completion_tokens)
+
+        if verbose:
+            status = "✓" if correct else ("~" if resp.is_mock else "✗")
+            print(
+                f"    [{i+1:3d}/{len(examples)}] {ex['id']:20s} "
+                f"gold={ex['gold']} pred={str(pred):4s} {status} "
+                f"{resp.latency_s:.2f}s  ${cost:.6f}",
+                flush=True,
+            )
+
+        return {
+            "model":            model.name,
+            "model_type":       "cloud",
+            "model_params_b":   None,
+            "benchmark":        benchmark,
+            "example_id":       ex["id"],
+            "gold":             ex["gold"],
+            "predicted":        pred,
+            "correct":          correct,
+            "latency_s":        resp.latency_s,
+            "energy_j":         resp.energy_j,
+            "energy_kwh":       resp.energy_j / 3_600_000 if not math.isnan(resp.energy_j) else _nan(),
+            "energy_method":    "EcoLogits (estimated)" if not math.isnan(resp.energy_j) else "N/A",
+            "emissions_g":      resp.emissions_g,
+            "cost_usd":         cost,
+            "prompt_tokens":    resp.prompt_tokens,
+            "completion_tokens":resp.completion_tokens,
+            "is_mock":          resp.is_mock,
+            "error":            resp.error or "",
+        }
+
+    max_workers = 10 if not model.is_mock else 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        rows = list(executor.map(_evaluate, enumerate(examples)))
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# CSV writer (incremental — safe against mid-run crashes)
+# ---------------------------------------------------------------------------
+
+def _open_csv(path: Path) -> tuple[Any, Any]:
+    """Open CSV for append; write header if file is new or has a stale schema."""
+    is_new = not path.exists()
+    if not is_new:
+        # Check that the existing file's header matches our schema
+        with open(path, newline="") as check:
+            existing_header = check.readline().strip().split(",")
+        if existing_header != CSV_FIELDS:
+            print(
+                f"  [harness] WARNING: {path.name} has a different schema "
+                f"(old project?). Replacing it."
+            )
+            path.unlink()
+            is_new = True
+    fh     = open(path, "a", newline="")
+    writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS, extrasaction="ignore")
+    if is_new:
+        writer.writeheader()
+    return fh, writer
+
+
+# ---------------------------------------------------------------------------
+# Full eval entry point
 # ---------------------------------------------------------------------------
 
 def run_eval(
-    local_model_tags: list[str] | None = None,
+    local_tags:    list[str],
+    subset:        dict[str, list[dict]],
     include_cloud: bool = True,
-    cloud_only: bool = False,
-    use_codecarbon: bool = True,
-    eval_path: Path | None = None,
-    results_csv: Path | None = None,
-    verbose: bool = True,
-) -> pd.DataFrame:
+    use_power:     bool = True,
+    results_csv:   Path = RESULTS_CSV,
+    verbose:       bool = True,
+) -> None:
     """
-    Run the full eval harness.
+    Run all models over the full benchmark subset and write to CSV incrementally.
 
-    Args:
-        local_model_tags: Ollama model tags to benchmark.
-        include_cloud: Whether to include a cloud baseline.
-        cloud_only: Skip local inference; replace only the cloud rows in the
-            existing CSV and keep all local rows intact.
-        cloud_provider: "gemini" (only supported option).
-        use_codecarbon: Wrap local calls in CodeCarbon energy tracking.
-        eval_path: Path to eval_set.json.
-        results_csv: Output path. Defaults to results/results.csv.
-        verbose: Print progress to stdout.
-
-    Returns:
-        DataFrame of all results.
+    Parameters
+    ----------
+    local_tags    : Ollama model tags to benchmark.
+    subset        : {benchmark: [example, ...]} from benchmarks.build_subset().
+    include_cloud : Whether to run the Gemini cloud reference.
+    use_power     : If False, skip energy measurement (accuracy/latency only).
+    results_csv   : Output CSV path.
+    verbose       : Print per-example progress.
     """
-    eval_path = eval_path or EVAL_PATH
-    results_csv = results_csv or RESULTS_DIR / "results.csv"
-
-    with open(eval_path) as f:
-        examples = json.load(f)
-
-    cloud_model = get_cloud_model() if include_cloud else None
-
-    rows: list[dict[str, Any]] = []
-    done = 0
-
-    def _log(msg: str) -> None:
-        if verbose:
-            print(msg, flush=True)
-
-    if not cloud_only:
-        local_models = get_local_models(local_model_tags)
-        total = len(examples) * (len(local_models) + (1 if cloud_model else 0))
-        for model in local_models:
-            _log(f"\n=== {model.name} ===")
-            for ex in examples:
-                row = _run_one_local(model, ex, use_codecarbon=use_codecarbon)
-                rows.append(row)
-                done += 1
-                status = "✓" if row["parse_ok"] else "✗"
-                _log(
-                    f"  [{done}/{total}] {ex['id']:20s} "
-                    f"score={row['score_overall']:.2f} "
-                    f"lat={row['latency_s']:.2f}s {status}"
-                )
-    else:
-        total = len(examples)
-
-    if cloud_model is not None:
-        mock_note = " [MOCK — no credentials]" if cloud_model.is_mock else ""
-        _log(f"\n=== {cloud_model.name}{mock_note} ===")
-        for ex in examples:
-            row = _run_one_cloud(cloud_model, ex)
-            rows.append(row)
-            done += 1
-            status = "✓" if row["parse_ok"] else "✗"
-            _log(
-                f"  [{done}/{total}] {ex['id']:20s} "
-                f"score={row['score_overall']:.2f} "
-                f"lat={row['latency_s']:.2f}s {status}"
+    if use_power:
+        ok, msg = check_power_available()
+        if not ok:
+            raise RuntimeError(
+                f"Energy measurement requested but hardware power source unavailable:\n"
+                f"  {msg}\n\n"
+                "Either run with sudo, or pass --no-power to skip energy measurement."
             )
 
-    new_df = pd.DataFrame(rows)
+    fh, writer = _open_csv(results_csv)
 
-    if cloud_only and results_csv.exists():
-        existing = pd.read_csv(results_csv)
-        new_bases = {n.replace(" [mock]", "") for n in new_df["model"].unique()}
-        keep = existing["model"].apply(
-            lambda m: m.replace(" [mock]", "") not in new_bases
-        )
-        existing = existing[keep]
-        df = pd.concat([existing, new_df], ignore_index=True)
-        _log(f"  (merged with existing local rows)")
-    else:
-        df = new_df
+    try:
+        # --- Local models ---
+        for tag in local_tags:
+            model = OllamaModel(tag)
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"  LOCAL: {model.name}")
+                print(f"{'='*60}")
 
-    df.to_csv(results_csv, index=False)
-    _log(f"\nResults saved to {results_csv}")
-    return df
+            for bm, examples in subset.items():
+                if verbose:
+                    print(f"\n  Benchmark: {bm} ({len(examples)} examples)")
+
+                rows = run_local_benchmark(
+                    model, bm, examples,
+                    use_power=use_power,
+                    verbose=verbose,
+                )
+                writer.writerows(rows)
+                fh.flush()
+
+                if verbose and rows:
+                    acc = sum(r["correct"] for r in rows) / len(rows)
+                    if use_power and not math.isnan(rows[0]["energy_j"]):
+                        print(
+                            f"  → acc={acc:.1%}  "
+                            f"energy={rows[0]['energy_j']:.4f} J/query  "
+                            f"(method: {rows[0]['energy_method']})"
+                        )
+                    else:
+                        print(f"  → acc={acc:.1%}")
+
+        # --- Cloud model ---
+        if include_cloud:
+            cloud = GeminiModel()
+            mock_note = " [MOCK — no credentials]" if cloud.is_mock else ""
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"  CLOUD: {cloud.name}{mock_note}")
+                print(f"{'='*60}")
+
+            for bm, examples in subset.items():
+                if verbose:
+                    print(f"\n  Benchmark: {bm} ({len(examples)} examples)")
+
+                rows = run_cloud_benchmark(
+                    cloud, bm, examples, verbose=verbose
+                )
+                writer.writerows(rows)
+                fh.flush()
+
+                if verbose and rows:
+                    acc      = sum(r["correct"] for r in rows) / len(rows)
+                    total_cost = sum(
+                        r["cost_usd"] for r in rows
+                        if not math.isnan(r["cost_usd"])
+                    )
+                    print(f"  → acc={acc:.1%}  total_cost=${total_cost:.4f}")
+
+    finally:
+        fh.close()
+
+    if verbose:
+        print(f"\nResults written to {results_csv}")
