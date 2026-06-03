@@ -1,171 +1,161 @@
 # bench-scheduling
 
-**Can a small local LLM handle scheduling tasks well enough to replace a cloud model?**
+**Edge vs. cloud tradeoff for small LLMs: how small can a local model be while staying useful?**
 
-This project benchmarks small local models (via [Ollama](https://ollama.com)) against
-Google Gemini on personal-assistant scheduling tasks drawn from the
-[MASSIVE](https://huggingface.co/datasets/AmazonScience/massive) dataset.
-It measures accuracy, latency, and estimated carbon emissions to explore the
-local-vs-cloud tradeoff.
+Benchmarks the Qwen2.5 family (0.5B → 7B) and Phi-3-mini against Gemini 2.5 Flash
+across **accuracy, latency, energy/carbon (estimated), and $ cost** on two commonsense
+MCQ tasks: HellaSwag and PIQA.
+
+---
+
+## Scoring method
+
+### Local models — log-likelihood argmax
+Each answer candidate is scored by the model's log P(candidate | context).
+The prediction is argmax — same algorithm as [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
+Two metrics are reported:
+- **acc** — argmax of raw log-likelihood
+- **acc_norm** — argmax of length-normalised log-likelihood *(primary metric)*
+
+`acc_norm` corrects for answer choices that differ in token length and is the
+number that matches published lm-eval baselines.
+
+### Cloud (Gemini) — generative MCQ
+Gemini does not expose per-token log-probs over forced continuations, so it
+is scored generatively: the model is asked to output an answer letter/number and
+that is compared against gold.  **acc and acc_norm are the same value for cloud
+rows** (no length normalisation is possible).  This means local and cloud scores
+are *approximately* but not exactly comparable.
+
+---
+
+## Energy / carbon: ESTIMATES
+
+| Source  | Tool          | Method                                       |
+|---------|---------------|----------------------------------------------|
+| Local   | CodeCarbon    | CPU + RAM TDP heuristics × grid-avg CI       |
+| Cloud   | EcoLogits     | Model-architecture LCA estimate              |
+
+Accuracy, latency, and cloud $ cost are **measured/exact**.
+Energy and carbon figures carry "(est)" throughout.
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/your-username/bench-scheduling
-cd bench-scheduling
+# 1. Install
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Install and start Ollama  (https://ollama.com/download)
-ollama serve &
-ollama pull llama3.2:1b
-ollama pull phi3:mini
-ollama pull mistral:7b
+# 2. (Optional) set your electricity rate and Gemini credentials
+cp .env.example .env   # edit ELECTRICITY_RATE_USD_PER_KWH and GOOGLE_CLOUD_PROJECT
 
-# 3. Build the eval set from MASSIVE (free HuggingFace download, no API key)
-python scripts/build_eval_set.py   # writes data/eval_set.json (~80 examples)
+# 3. Validate one model end-to-end before the full sweep
+python scripts/run_eval.py --validate-only --no-power
 
-# 4. (Optional) Set Gemini credentials for a real cloud baseline
-cp .env.example .env
-# edit .env: set GOOGLE_CLOUD_PROJECT to your GCP project
-# run: gcloud auth application-default login
-# Without credentials the harness runs a deterministic mock Gemini response.
+# 4. Full local sweep (no cloud API calls)
+python scripts/run_eval.py --no-cloud
 
-# 5. Run the full benchmark
-# sudo gives CodeCarbon real power readings via powermetrics (macOS)
-sudo python scripts/run_eval.py          # local + mock Gemini
-sudo python scripts/run_eval.py --no-cloud  # local only
+# 5. Full sweep including cloud (asks for confirmation before paid calls)
+python scripts/run_eval.py
 
-# 6. Results and plots land in:
-#   results/results.csv
-#   plots/plot1_accuracy_vs_size.png
-#   plots/plot2_energy_cost.png
-#   plots/plot3_cumulative_co2.png
-#   plots/plot4_latency_vs_accuracy.png
+# 6. Re-plot from an existing CSV
+python scripts/run_eval.py --plots-only
 ```
+
+### Common flags
+
+| Flag | Effect |
+|---|---|
+| `--no-cloud` | Skip Gemini, local models only |
+| `--cloud-only` | Skip local models, Gemini only |
+| `--no-power` | Disable CodeCarbon (faster, no energy data) |
+| `--validate-only` | Run 3B model + sanity checks, then exit |
+| `--rebuild-subset` | Force fresh HuggingFace download + re-sample |
+| `--models HF_ID ...` | Override model list |
+| `--plots-only` | Re-plot from existing CSV without re-running |
+
+---
+
+## Models
+
+Default local models (open, no login required):
+
+| HuggingFace ID | Params |
+|---|---|
+| `Qwen/Qwen2.5-0.5B-Instruct` | 0.5B |
+| `Qwen/Qwen2.5-1.5B-Instruct` | 1.5B |
+| `Qwen/Qwen2.5-3B-Instruct` | 3.0B |
+| `microsoft/Phi-3-mini-4k-instruct` | 3.8B |
+| `Qwen/Qwen2.5-7B-Instruct` | 7.0B |
+
+To add Llama 3.2 or Mistral, pass them via `--models` and run
+`huggingface-cli login` first (license acceptance required).
+
+Cloud: `gemini-2.5-flash` via Vertex AI (`GOOGLE_CLOUD_PROJECT` in `.env`).
+Without credentials the cloud path runs a mock (outputs "A" for every example).
+
+---
+
+## Benchmarks
+
+| Benchmark | Task | Choices | Chance | Split used |
+|---|---|---|---|---|
+| [HellaSwag](https://rowanzellers.com/hellaswag/) | Complete the sentence | 4 | 25% | validation |
+| [PIQA](https://yonatanbisk.com/piqa/) | Physical commonsense | 2 | 50% | validation |
+
+200 examples per benchmark (seed 42) are sampled once and saved to
+`data/subset.json` with source indices so all models evaluate the identical items.
+
+---
+
+## Plots
+
+| File | Description |
+|---|---|
+| `plot1_acc_vs_size.png` | acc_norm vs parameter count, 95% Wilson CI, per benchmark |
+| `plot2_pareto.png` | acc_norm vs energy/query and vs latency, Pareto frontier |
+| `plot3_co2_crossover.png` | Cumulative CO2 over 1 year at 5/20/50/100 queries/day **(estimated)** |
+| `plot4_cost_accuracy.png` | acc_norm vs $ per 1k queries (local electricity vs cloud API) |
+
+---
 
 ## Project structure
 
 ```
 bench-scheduling/
 ├── data/
-│   └── eval_set.json        # ~80 labelled examples from MASSIVE (calendar scenario)
+│   └── subset.json            # fixed-seed subset (built on first run)
 ├── src/
-│   ├── models.py            # OllamaModel, GeminiModel (mock fallback when no creds)
-│   ├── scoring.py           # Lenient JSON parsing + weighted field-level scoring
-│   ├── harness.py           # Eval loop + CodeCarbon / EcoLogits integration
-│   └── plots.py             # Four benchmark plots
+│   ├── subset.py              # build/load data/subset.json
+│   ├── local_eval.py          # direct LL scorer + CodeCarbon wrap
+│   ├── cloud_eval.py          # Gemini generative MCQ + EcoLogits
+│   ├── results.py             # CSV schema + write helpers
+│   └── plots.py               # four analysis plots
 ├── scripts/
-│   ├── build_eval_set.py    # Download + parse MASSIVE → data/eval_set.json
-│   ├── run_eval.py          # Main CLI entry point
-│   └── demo.py              # Interactive scheduling demo
-├── results/                 # CSV output (git-ignored)
-└── plots/                   # PNG output (git-ignored)
+│   └── run_eval.py            # CLI entry point
+├── results/
+│   └── results.csv            # output (one row per model × benchmark)
+├── plots/                     # PNG output
+├── requirements.txt
+└── .env.example
 ```
 
 ---
 
-## Step-by-step guide
+## CSV schema
 
-### Step 1 — Prompt design
+One row per `(model, benchmark)`:
 
-Each model receives a shared system prompt instructing it to parse a natural-language
-scheduling request and return a JSON object with 11 fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `intent` | enum | add_event / reschedule / cancel / query_schedule / prioritize |
-| `title` | string | |
-| `start_time` | ISO 8601 / null | |
-| `end_time` | ISO 8601 / null | |
-| `duration_minutes` | int / null | |
-| `attendees` | string[] | |
-| `location` | string | |
-| `recurrence` | enum | none / daily / weekly / biweekly / monthly |
-| `date_reference` | string | natural-language phrase |
-| `priority` | enum / null | high / medium / low |
-| `notes` | string | |
-
-The prompt is inlined in `src/models.py` as `SYSTEM_PROMPT`.
-
-### Step 2 — Eval set (MASSIVE dataset)
-
-`data/eval_set.json` is built from the
-[MASSIVE](https://huggingface.co/datasets/AmazonScience/massive) dataset
-(Amazon, 2022) — a multilingual NLU corpus with real user utterances and gold
-intent + slot annotations.
-
-We filter the **en-US test split** to `scenario == "calendar"` (three intents:
-`calendar_set` → `add_event`, `calendar_query` → `query_schedule`,
-`calendar_remove` → `cancel`), parse `[slot : value]` spans from the `annot_utt`
-field into our schema, and subsample **~80 balanced examples**.
-
-Rebuild at any time:
-```bash
-python scripts/build_eval_set.py          # default: 80 examples, seed 42
-python scripts/build_eval_set.py --n 120  # larger set
-```
-
-### Step 3 — Models
-
-Local models run through Ollama. Default set:
-
-| Model | ~Params |
+| Column | Notes |
 |---|---|
-| `llama3.2:1b` | 1B |
-| `phi3:mini` | 3.8B |
-| `mistral:7b` | 7B |
-
-Add or replace models with `--models`:
-```bash
-python scripts/run_eval.py --models llama3.2:1b phi3:mini mistral:7b
-```
-
-To enable real Gemini calls:
-```bash
-gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT=your-gcp-project-id   # or set in .env
-```
-
-### Step 4 — Harness
-
-`src/harness.py` orchestrates the eval loop:
-
-- Wraps each input in the scheduling system prompt.
-- Records raw output, latency, parse success.
-- Uses **CodeCarbon** `EmissionsTracker` around each Ollama call to measure local
-  energy use (requires the machine to report power draw — see caveats below).
-- Uses **EcoLogits**, which patches the `google-genai` client at startup so every
-  real Gemini response carries `.impacts.gwp` (a min/max GWP range); the harness
-  records the midpoint.
-- Scores each prediction field-by-field (see Scoring below).
-- Writes `results/results.csv`.
-
-### Step 5 — Plots
-
-Run `python scripts/run_eval.py` (or `--plots-only` to re-plot from an existing CSV).
-
-| Plot | File | What it shows |
-|---|---|---|
-| 1 | `plot1_accuracy_vs_size.png` | Weighted accuracy vs. log-scale param count |
-| 2 | `plot2_energy_cost.png` | gCO₂eq and milli-USD per query |
-| 3 | `plot3_cumulative_co2.png` | Annual cumulative CO₂ at 5/20/50/100 queries/day |
-| 4 | `plot4_latency_vs_accuracy.png` | Latency (mean + p95) vs. accuracy scatter |
-
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| `ollama` | Local model inference |
-| `google-genai` | Cloud baseline (Gemini via Vertex AI) |
-| `datasets` | Download + parse MASSIVE eval set |
-| `codecarbon` | Local energy / CO₂ tracking |
-| `ecologits` | Cloud CO₂ via LCA — patches google-genai client |
-| `pandas` | Results dataframe + CSV |
-| `matplotlib` | Plots |
-| `python-dotenv` | `.env` file loading |
-
-Install all with `pip install -r requirements.txt`
+| `model`, `model_type`, `params_b` | identity |
+| `benchmark` | hellaswag / piqa |
+| `acc`, `acc_norm`, `acc_stderr` | accuracy metrics (Wilson stderr) |
+| `latency_median_s`, `latency_p90_s` | per-query latency |
+| `energy_kwh_per_query` | **ESTIMATE** (CodeCarbon or EcoLogits) |
+| `emissions_g_per_query` | **ESTIMATE** (CO2 grams) |
+| `energy_method` | "CodeCarbon (est)" / "EcoLogits (est)" / "mock" |
+| `cost_usd_per_query` | local: electricity rate × energy; cloud: exact API cost |
+| `is_mock` | True if Gemini credentials were absent |

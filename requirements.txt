@@ -1,19 +1,22 @@
-# Benchmark data (hellaswag, piqa, arc_easy from HuggingFace)
-datasets>=2.14.0,<3.0.0
+# HuggingFace ecosystem
+torch>=2.1
+transformers>=4.40
+accelerate>=0.27
+datasets>=2.18
 
-# Models
-google-genai>=1.0.0     # Gemini API (reads GEMINI_API_KEY from env)
-ollama>=0.2.0           # local models via Ollama daemon
+# Energy / carbon tracking (all estimates — see README)
+codecarbon>=2.3
+ecologits[google-generativeai]>=0.5
 
-# Data / compute
-pandas>=2.1.0
-numpy>=1.26.0
+# Cloud model
+google-genai>=0.8
 
-# Plots
-matplotlib>=3.8.0
+# Data / plots
+pandas>=2.0
+matplotlib>=3.7
+scipy>=1.10
+numpy>=1.24
 
-# Env
-python-dotenv>=1.0.0
-
-# Dev
-pytest>=8.0.0
+# Utilities
+python-dotenv>=1.0
+tqdm>=4.66

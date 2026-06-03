@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
 """
-Run the full edge-LLM tradeoff benchmark.
+Edge-LLM tradeoff benchmark: accuracy, latency, energy/carbon, and $ cost.
 
-Usage
+SCORING
+-------
+Local models  : log-likelihood argmax (acc + acc_norm) — matches lm-eval-harness.
+Cloud (Gemini): generative MCQ (answer letter) — Gemini has no forced-continuation
+                logprobs, so direct comparison with local acc_norm is approximate.
+
+ENERGY / CARBON
+---------------
+All energy and carbon figures are ESTIMATES:
+  - Local : CodeCarbon (CPU/RAM TDP heuristics + grid-average carbon intensity)
+  - Cloud : EcoLogits (model-architecture estimates)
+Accuracy, latency, and cloud $ cost are exact / measured.
+
+USAGE
 -----
-# Full run (requires sudo for energy measurement):
-sudo python scripts/run_eval.py
+# Validate one model end-to-end (accuracy + energy + plots):
+  python scripts/run_eval.py --validate-only
 
-# Local models only, no cloud call:
-sudo python scripts/run_eval.py --no-cloud
+# Full local sweep (no cloud):
+  python scripts/run_eval.py --no-cloud
 
-# Skip energy measurement (for testing accuracy/latency without sudo):
-python scripts/run_eval.py --no-power
+# Full local + cloud (will ask before paid calls):
+  python scripts/run_eval.py
 
-# Specific models only:
-sudo python scripts/run_eval.py --models llama3.2:1b mistral:7b
+# Re-plot from existing CSV without re-running:
+  python scripts/run_eval.py --plots-only
 
-# Re-plot from an existing CSV without re-running inference:
-python scripts/run_eval.py --plots-only
-
-# Rebuild the benchmark subset (forces new download + resample):
-sudo python scripts/run_eval.py --rebuild-subset
+# Rebuild subset from scratch:
+  python scripts/run_eval.py --rebuild-subset
 """
 
 from __future__ import annotations
@@ -34,156 +44,187 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.benchmarks import build_subset
-from src.harness import run_eval, RESULTS_CSV
-from src.models import DEFAULT_LOCAL_MODELS
-from src.power import check_power_available
+from src.subset     import build_subset
+from src.results    import open_csv, fill_local_cost, RESULTS_CSV
+from src.local_eval import DEFAULT_MODELS, VALIDATION_MODEL
 
 
 # ---------------------------------------------------------------------------
-# Guard: warn before any paid cloud call
+# Cloud confirmation guard
 # ---------------------------------------------------------------------------
 
-def _confirm_cloud(model_name: str) -> bool:
-    print(f"\n  Cloud model: {model_name}")
-    print("  This will make REAL API calls to Gemini via Vertex AI.")
-    print("  Cost estimate: 600 examples × ~$0.0001/call ≈ $0.06")
+def _confirm_cloud(model_name: str, n_examples: int) -> bool:
+    input_m  = n_examples / 1_000_000
+    # Rough estimate: ~150 input + 2 output tokens per example
+    est_cost = input_m * 150 * 0.30 + input_m * 2 * 2.50
+    print(f"\n  Cloud model : {model_name}")
+    print(f"  Examples    : {n_examples}")
+    print(f"  Cost est.   : ~${est_cost:.3f}  (150 input + 2 output tokens/query)")
+    print("  Note        : actual cost depends on prompt length — verify in GCP console")
     ans = input("  Proceed with cloud inference? [y/N] ").strip().lower()
     return ans in ("y", "yes")
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# Validation-only run (one model, one benchmark)
+# ---------------------------------------------------------------------------
+
+def _run_validation(subset: dict, use_power: bool, csv_path: Path) -> None:
+    """
+    Run VALIDATION_MODEL on ALL benchmarks, check acc_norm > chance, write CSV.
+    Intended to be run once before the full sweep.
+    """
+    from src.local_eval import run_local_eval
+
+    print(f"\nValidation run: {VALIDATION_MODEL} on all benchmarks")
+    rows = run_local_eval(
+        model_id=VALIDATION_MODEL,
+        subset=subset,
+        use_power=use_power,
+        verbose=True,
+        run_validation=True,
+    )
+    rows = fill_local_cost(rows)
+    fh, writer = open_csv(csv_path)
+    writer.writerows(rows)
+    fh.flush()
+    fh.close()
+
+    print("\n  Validation passed. acc_norm for each benchmark:")
+    for r in rows:
+        print(f"    {r['benchmark']:12s} acc={r['acc']:.1%}  acc_norm={r['acc_norm']:.1%}  "
+              f"(n={r['n_examples']})")
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Edge-LLM tradeoff benchmark: accuracy, latency, energy, cost.",
+        description="Edge-LLM tradeoff benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
     parser.add_argument(
-        "--models", nargs="+", default=None, metavar="TAG",
-        help=f"Ollama model tags (default: {' '.join(DEFAULT_LOCAL_MODELS)})",
+        "--models", nargs="+", default=None, metavar="HF_ID",
+        help=f"HuggingFace model IDs (default: {' '.join(DEFAULT_MODELS)})",
+    )
+    parser.add_argument("--no-cloud",       action="store_true", help="Skip Gemini cloud run")
+    parser.add_argument("--cloud-only",     action="store_true", help="Skip local models")
+    parser.add_argument("--no-power",       action="store_true", help="Skip CodeCarbon energy tracking")
+    parser.add_argument("--rebuild-subset", action="store_true", help="Force re-download and re-sample")
+    parser.add_argument("--validate-only",  action="store_true",
+                        help=f"Run {VALIDATION_MODEL} + check, then exit")
+    parser.add_argument("--plots-only",     action="store_true", help="Regenerate plots from existing CSV")
+    parser.add_argument("--csv",            type=Path, default=None, help="Override output CSV path")
+    parser.add_argument("--quiet",          action="store_true")
+    parser.add_argument(
+        "--queries-per-day", nargs="+", type=int, default=[5, 20, 50, 100],
+        metavar="N", help="CO2 crossover plot scenarios (default: 5 20 50 100)",
     )
     parser.add_argument(
-        "--no-cloud", action="store_true",
-        help="Skip the Gemini cloud reference entirely",
-    )
-    parser.add_argument(
-        "--cloud-only", action="store_true",
-        help="Run only the Gemini cloud reference (skip local models)",
-    )
-    parser.add_argument(
-        "--no-power", action="store_true",
-        help="Skip energy measurement (accuracy + latency only; no sudo required)",
-    )
-    parser.add_argument(
-        "--rebuild-subset", action="store_true",
-        help="Force a fresh benchmark subset (re-download + re-sample)",
-    )
-    parser.add_argument(
-        "--plots-only", action="store_true",
-        help="Skip inference — regenerate plots from the existing CSV",
-    )
-    parser.add_argument(
-        "--csv", type=Path, default=None,
-        help=f"Results CSV path (default: {RESULTS_CSV})",
-    )
-    parser.add_argument(
-        "--quiet", action="store_true",
-        help="Suppress per-example output",
+        "--electricity-rate", type=float, default=None,
+        help="kWh rate for local cost (default: $ELECTRICITY_RATE_USD_PER_KWH or 0.12)",
     )
     args = parser.parse_args()
 
     csv_path = args.csv or RESULTS_CSV
+    verbose  = not args.quiet
 
-    # ------------------------------------------------------------------
-    # Plots-only shortcut
-    # ------------------------------------------------------------------
+    # --- Plots-only shortcut ---
     if args.plots_only:
-        if not csv_path.exists():
-            print(f"ERROR: no results CSV at {csv_path}. Run without --plots-only first.")
-            sys.exit(1)
-        _generate_plots(csv_path)
+        _do_plots(csv_path, args)
         return
 
-    # ------------------------------------------------------------------
-    # Power check (skip if cloud-only or --no-power)
-    # ------------------------------------------------------------------
-    use_power = not args.no_power and not args.cloud_only
-    if use_power:
-        ok, msg = check_power_available()
-        if not ok:
-            print("\nERROR: hardware power measurement unavailable.")
-            print(f"  {msg}")
-            print("\nOptions:")
-            print("  • Ensure CodeCarbon and its dependencies (e.g. pynvml, rapl) are installed")
-            print("  • Pass --no-power to skip energy measurement (records NaN)")
-            sys.exit(1)
-        print(f"\n  Power source: {msg}")
-
-    # ------------------------------------------------------------------
-    # Benchmark subset (build once, reuse)
-    # ------------------------------------------------------------------
-    print("\nLoading benchmark subset...")
+    # --- Build subset ---
+    print("\nBuilding/loading benchmark subset...")
     subset = build_subset(force=args.rebuild_subset)
     total  = sum(len(v) for v in subset.values())
     print(f"  {total} examples across {len(subset)} benchmarks "
           f"({', '.join(f'{k}:{len(v)}' for k, v in subset.items())})")
 
-    # ------------------------------------------------------------------
-    # Cloud confirmation
-    # ------------------------------------------------------------------
-    include_cloud = not args.no_cloud
-    if include_cloud:
-        from src.models import GeminiModel
-        cloud = GeminiModel()
-        if cloud.is_mock:
-            print(f"\n  Cloud: {cloud.name} (mock — GOOGLE_CLOUD_PROJECT not set)")
-        else:
-            if not _confirm_cloud(cloud.name):
+    # --- Validate-only shortcut ---
+    if args.validate_only:
+        _run_validation(subset, use_power=not args.no_power, csv_path=csv_path)
+        _do_plots(csv_path, args)
+        return
+
+    # --- Local models ---
+    from src.local_eval import run_local_eval
+
+    local_models = [] if args.cloud_only else (args.models or DEFAULT_MODELS)
+    use_power    = not args.no_power and not args.cloud_only
+
+    if local_models:
+        print(f"\nLocal models : {', '.join(local_models)}")
+        print(f"Energy track : {'CodeCarbon (ESTIMATE)' if use_power else 'disabled (--no-power)'}")
+        print(f"Output CSV   : {csv_path}\n")
+
+    fh, writer = open_csv(csv_path)
+    try:
+        for model_id in local_models:
+            rows = run_local_eval(
+                model_id=model_id,
+                subset=subset,
+                use_power=use_power,
+                verbose=verbose,
+                run_validation=(model_id == VALIDATION_MODEL),
+            )
+            rows = fill_local_cost(rows, electricity_rate=args.electricity_rate)
+            writer.writerows(rows)
+            fh.flush()
+
+        # --- Cloud model ---
+        if not args.no_cloud:
+            from src.cloud_eval import GeminiEvaluator, run_cloud_eval
+
+            gem = GeminiEvaluator()
+            if gem.is_mock:
+                print(f"\n  Cloud: {gem.name}  (no GOOGLE_CLOUD_PROJECT — running mock)")
+                do_cloud = True
+            else:
+                do_cloud = _confirm_cloud(gem.name, total)
+
+            if do_cloud:
+                cloud_rows = run_cloud_eval(subset, verbose=verbose)
+                writer.writerows(cloud_rows)
+                fh.flush()
+            else:
                 print("  Skipping cloud inference.")
-                include_cloud = False
 
-    # ------------------------------------------------------------------
-    # Run
-    # ------------------------------------------------------------------
-    local_tags = [] if args.cloud_only else (args.models or DEFAULT_LOCAL_MODELS)
-    if not args.cloud_only:
-        print(f"\n  Local models: {', '.join(local_tags)}")
-        print(f"  Energy measurement: {'yes (CodeCarbon)' if use_power else 'no (--no-power)'}")
-    else:
-        print("\n  Mode: cloud only (skipping local inference)")
-    print(f"  Output CSV: {csv_path}\n")
+    finally:
+        fh.close()
 
-    run_eval(
-        local_tags    = local_tags,
-        subset        = subset,
-        include_cloud = include_cloud,
-        use_power     = use_power,
-        results_csv   = csv_path,
-        verbose       = not args.quiet,
-    )
-
-    # ------------------------------------------------------------------
-    # Plots
-    # ------------------------------------------------------------------
-    _generate_plots(csv_path)
+    print(f"\nResults written to {csv_path}")
+    _do_plots(csv_path, args)
 
 
-def _generate_plots(csv_path: Path) -> None:
+def _do_plots(csv_path: Path, args: argparse.Namespace) -> None:
+    import os
     import pandas as pd
     from src.plots import generate_all
 
     if not csv_path.exists():
-        print(f"No CSV at {csv_path} — skipping plots.")
+        print(f"\nNo CSV at {csv_path} — skipping plots.")
         return
 
     df = pd.read_csv(csv_path)
-    print(f"\nLoaded {len(df)} rows from {csv_path}")
-    print("Generating plots...")
-    paths = generate_all(df)
-    print("\nPlots written to:")
+    if df.empty:
+        print("\nCSV is empty — skipping plots.")
+        return
+
+    electricity_rate = args.electricity_rate or float(
+        os.getenv("ELECTRICITY_RATE_USD_PER_KWH", "0.12")
+    )
+
+    print(f"\nLoaded {len(df)} rows from {csv_path.name}")
+    paths = generate_all(
+        df,
+        queries_per_day=args.queries_per_day,
+        electricity_rate=electricity_rate,
+    )
+    print("\nPlots saved:")
     for p in paths:
         print(f"  {p}")
 
