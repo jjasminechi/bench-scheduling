@@ -57,14 +57,14 @@ def _fmt_hellaswag(ex: dict) -> dict[str, Any]:
     ctx     = ex.get("ctx", "")
     label   = ex.get("activity_label", "")
     context = f"{label}: {_preprocess_hellaswag(ctx)}" if label else _preprocess_hellaswag(ctx)
-    choices = [" " + _preprocess_hellaswag(e) for e in ex["endings"]]
+    choices = [_preprocess_hellaswag(e) for e in ex["endings"]]
     gold    = int(ex["label"])
     return {"context": context, "choices": choices, "gold": gold}
 
 
 def _fmt_piqa(ex: dict) -> dict[str, Any]:
     context = f"Question: {ex['goal']}\nAnswer:"
-    choices = [" " + ex["sol1"], " " + ex["sol2"]]
+    choices = [ex["sol1"], ex["sol2"]]
     gold    = int(ex["label"])
     return {"context": context, "choices": choices, "gold": gold}
 

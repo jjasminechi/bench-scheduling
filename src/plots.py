@@ -82,11 +82,12 @@ def plot_accuracy(df: pd.DataFrame, out_dir: Path) -> Path:
             continue
         vals = [float(acc.loc[m, bm]) if m in acc.index else float("nan")
                 for m in all_models]
-        ax.bar(
+        bars = ax.bar(
             x + offsets[i], vals, width,
             label=BENCH_LABELS[bm],
             color=bench_colors[bm], hatch=bench_hatches[bm], alpha=0.85,
         )
+        ax.bar_label(bars, fmt=lambda v: f"{v:.0%}", fontsize=7, padding=2)
 
     # Vertical divider between local and cloud
     if local_order and cloud_order:
@@ -159,20 +160,20 @@ def plot_accuracy_vs_latency(df: pd.DataFrame, out_dir: Path) -> Path:
 # Plot 3 — Energy per query (estimated), one bar per model
 # ---------------------------------------------------------------------------
 
-def plot_energy(df: pd.DataFrame, out_dir: Path) -> Path:
+def plot_co2(df: pd.DataFrame, out_dir: Path) -> Path:
     agg = (
-        df.groupby(["model", "model_type"])["energy_kwh_per_query"]
+        df.groupby(["model", "model_type"])["emissions_g_per_query"]
         .mean()
         .reset_index()
     )
-    agg = agg[agg["energy_kwh_per_query"].apply(
-        lambda v: not (v != v) and not math.isnan(float(v))  # drop NaN
+    agg = agg[agg["emissions_g_per_query"].apply(
+        lambda v: not math.isnan(float(v))
     )].copy()
 
     if agg.empty:
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.set_title("Energy per query (estimated) — no data yet")
-        path = out_dir / "plot3_energy.png"
+        ax.set_title("CO2 per query (estimated) — no data yet")
+        path = out_dir / "plot3_co2.png"
         fig.savefig(path, dpi=150)
         plt.close(fig)
         return path
@@ -186,16 +187,17 @@ def plot_energy(df: pd.DataFrame, out_dir: Path) -> Path:
     order = [m for m in local_order if m in agg["model"].values] + \
             [m for m in cloud_order if m not in local_order]
 
-    agg = agg.set_index("model").loc[order].reset_index()
-    labels    = [_short(m) for m in agg["model"]]
-    colors    = [_color(m) for m in agg["model"]]
-    energy_j  = agg["energy_kwh_per_query"] * 3_600_000  # kWh → J
+    agg    = agg.set_index("model").loc[order].reset_index()
+    labels = [_short(m) for m in agg["model"]]
+    colors = [_color(m) for m in agg["model"]]
+    co2_mg = agg["emissions_g_per_query"] * 1000  # g → mg
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.bar(labels, energy_j, color=colors, alpha=0.85, edgecolor="white")
+    bars = ax.bar(labels, co2_mg, color=colors, alpha=0.85, edgecolor="white")
+    ax.bar_label(bars, fmt=lambda v: f"{v:.2f} mg", fontsize=7, padding=3)
     ax.set_yscale("log")
-    ax.set_ylabel("Energy per query (J, estimated — log scale)")
-    ax.set_title("Energy per Query by Model (estimated)")
+    ax.set_ylabel("CO2 per query (mg, estimated — log scale)")
+    ax.set_title("CO2 Emissions per Query by Model (estimated)")
     ax.set_xticklabels(labels, rotation=15, ha="right")
     ax.grid(axis="y", alpha=0.3)
 
@@ -203,7 +205,7 @@ def plot_energy(df: pd.DataFrame, out_dir: Path) -> Path:
     ax.legend(handles=handles, fontsize=8)
     fig.tight_layout()
 
-    path = out_dir / "plot3_energy.png"
+    path = out_dir / "plot3_co2.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
@@ -287,6 +289,6 @@ def generate_all(
     return [
         plot_accuracy(df, PLOTS_DIR),
         plot_accuracy_vs_latency(df, PLOTS_DIR),
-        plot_energy(df, PLOTS_DIR),
+        plot_co2(df, PLOTS_DIR),
         plot_accuracy_vs_cost(df, PLOTS_DIR, electricity_rate),
     ]
