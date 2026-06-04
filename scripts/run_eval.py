@@ -4,9 +4,9 @@ Edge-LLM tradeoff benchmark: accuracy, latency, energy/carbon, and $ cost.
 
 SCORING
 -------
-Local models  : log-likelihood argmax (acc + acc_norm) — matches lm-eval-harness.
-Cloud (Gemini): generative MCQ (answer letter) — Gemini has no forced-continuation
-                logprobs, so direct comparison with local acc_norm is approximate.
+Both local and cloud models use generative MCQ: the model generates a digit
+(1/2 for PIQA, 1–4 for HellaSwag) and that is compared against gold.
+acc_norm == acc for all rows.
 
 ENERGY / CARBON
 ---------------

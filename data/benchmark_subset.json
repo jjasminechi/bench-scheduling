@@ -1,7 +1,7 @@
 {
   "seed": 42,
   "n_per_benchmark": 200,
-  "scoring": "generative MCQ exact-match (not log-likelihood)",
+  "scoring": "generative MCQ exact-match",
   "benchmarks": {
     "hellaswag": [
       {

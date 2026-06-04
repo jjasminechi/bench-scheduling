@@ -210,69 +210,6 @@ def plot_co2(df: pd.DataFrame, out_dir: Path) -> Path:
     plt.close(fig)
     return path
 
-
-# ---------------------------------------------------------------------------
-# Plot 4 — Accuracy vs cost per 1k queries
-# ---------------------------------------------------------------------------
-
-def plot_accuracy_vs_cost(
-    df: pd.DataFrame,
-    out_dir: Path,
-    electricity_rate: float = 0.12,
-) -> Path:
-    agg = (
-        df.groupby(["model", "model_type"])
-        .agg(
-            acc=("acc", "mean"),
-            cost_usd=("cost_usd_per_query", "mean"),
-            energy_kwh=("energy_kwh_per_query", "mean"),
-        )
-        .reset_index()
-    )
-
-    for idx, row in agg.iterrows():
-        if row["model_type"] == "local" and math.isnan(float(row["cost_usd"])):
-            if not math.isnan(float(row["energy_kwh"])):
-                agg.at[idx, "cost_usd"] = row["energy_kwh"] * electricity_rate
-
-    agg["cost_per_1k"] = agg["cost_usd"] * 1000
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    for _, row in agg.iterrows():
-        if math.isnan(float(row["cost_per_1k"])) or math.isnan(float(row["acc"])):
-            continue
-        color  = _color(row["model"])
-        marker = "D" if row["model_type"] == "cloud" else "o"
-        ax.scatter(row["cost_per_1k"], row["acc"], color=color, marker=marker,
-                   s=90, zorder=3, edgecolors="white", linewidths=0.5)
-        ax.annotate(
-            _short(row["model"]), (row["cost_per_1k"], row["acc"]),
-            textcoords="offset points", xytext=(7, 4), fontsize=8,
-        )
-
-    handles = [
-        mpatches.Patch(color=_color(m), label=_short(m))
-        for m in agg["model"]
-        if not math.isnan(float(agg.loc[agg["model"] == m, "cost_per_1k"].iloc[0]))
-    ]
-    ax.legend(handles=handles, fontsize=8)
-    ax.set_xlabel(
-        f"Cost per 1k queries  "
-        f"(local = electricity @ ${electricity_rate}/kWh; cloud = API pricing)"
-    )
-    ax.set_ylabel("Accuracy (avg over benchmarks)")
-    ax.set_title("Accuracy vs Cost per 1k Queries")
-    ax.grid(alpha=0.3)
-    ax.set_ylim(0, 1.05)
-    fig.tight_layout()
-
-    path = out_dir / "plot4_accuracy_vs_cost.png"
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    return path
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -290,5 +227,4 @@ def generate_all(
         plot_accuracy(df, PLOTS_DIR),
         plot_accuracy_vs_latency(df, PLOTS_DIR),
         plot_co2(df, PLOTS_DIR),
-        plot_accuracy_vs_cost(df, PLOTS_DIR, electricity_rate),
     ]

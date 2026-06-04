@@ -7,7 +7,7 @@
       "piqa"
     ],
     "created": "2026-06-03T22:25:20.244870+00:00",
-    "scoring_note": "Local: log-likelihood argmax (acc + acc_norm, lm-eval algorithm). Cloud: generative MCQ (unavoidable \u2014 Gemini has no forced-continuation logprobs). Contexts in lm-eval 0-shot format."
+    "scoring_note": "Both local and cloud: generative MCQ \u2014 model outputs a digit, compared against gold. acc_norm == acc (no LL normalisation)."
   },
   "benchmarks": {
     "hellaswag": [

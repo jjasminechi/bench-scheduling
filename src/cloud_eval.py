@@ -1,14 +1,9 @@
 """
 Cloud evaluation via Gemini (Vertex AI) — generative MCQ.
 
-IMPORTANT ASYMMETRY WITH LOCAL MODELS:
-  Local:  log-likelihood argmax over forced continuations → acc + acc_norm
-  Cloud:  generative — model outputs an answer letter/number → acc only
-
-This asymmetry is unavoidable: Gemini does not expose per-token log-probs
-over arbitrary forced continuations.  For a capable cloud model, generative
-MCQ accuracy is close to log-likelihood accuracy in practice, but the scores
-are NOT directly comparable — document this in any analysis.
+Uses the same prompt format as local_eval.py: the model generates a digit
+(1/2 for PIQA, 1–4 for HellaSwag) and that is compared against gold.
+Scores are directly comparable with local model results.
 
 Energy:  EcoLogits estimate (patches google.genai at import time) — ESTIMATE.
 Cost:    EXACT — measured token usage × current pricing.

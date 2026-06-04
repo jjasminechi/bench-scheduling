@@ -1,8 +1,7 @@
 """
 Build and cache the fixed benchmark subset.
 
-Saves data/subset.json once so ALL evaluation paths (local log-likelihood and
-cloud generative) score the exact same examples.  Source indices are stored so
+Saves data/subset.json once so ALL evaluation paths score the exact same examples.  Source indices are stored so
 the subset is reproducible even if the upstream HuggingFace datasets are
 shuffled.
 
@@ -15,8 +14,8 @@ Format saved to disk:
   }
 }
 
-Context and choices are pre-formatted in lm-eval's 0-shot style so both the
-local direct-LL scorer and the cloud generative path use identical text.
+Context and choices are pre-formatted so both local and cloud generative
+evaluation paths score the exact same text.
 """
 
 from __future__ import annotations
@@ -141,9 +140,8 @@ def build_subset(
             "benchmarks":       BENCHMARKS,
             "created":          datetime.now(timezone.utc).isoformat(),
             "scoring_note": (
-                "Local: log-likelihood argmax (acc + acc_norm, lm-eval algorithm). "
-                "Cloud: generative MCQ (unavoidable — Gemini has no forced-continuation logprobs). "
-                "Contexts in lm-eval 0-shot format."
+                "Both local and cloud: generative MCQ — model outputs a digit, "
+                "compared against gold. acc_norm == acc (no LL normalisation)."
             ),
         },
         "benchmarks": result,

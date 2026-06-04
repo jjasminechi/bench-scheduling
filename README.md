@@ -2,7 +2,7 @@
 
 **Edge vs. cloud tradeoff for small LLMs: how small can a local model be while staying useful?**
 
-Benchmarks the Qwen2.5 family (0.5B → 7B) and Phi-3-mini against Gemini 2.5 Flash
+Benchmarks the Qwen2.5 family (0.5B → 3B) against Gemini 2.5 Flash and Gemini 2.5 Pro
 across **accuracy, latency, energy/carbon (estimated), and $ cost** on two commonsense
 MCQ tasks: HellaSwag and PIQA.
 
@@ -10,22 +10,12 @@ MCQ tasks: HellaSwag and PIQA.
 
 ## Scoring method
 
-### Local models — log-likelihood argmax
-Each answer candidate is scored by the model's log P(candidate | context).
-The prediction is argmax — same algorithm as [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
-Two metrics are reported:
-- **acc** — argmax of raw log-likelihood
-- **acc_norm** — argmax of length-normalised log-likelihood *(primary metric)*
+Both local and cloud models use **generative MCQ**: each example is formatted
+as a numbered prompt, the model generates a short response, and the first valid
+digit is the prediction.  This gives a direct apples-to-apples comparison
+between local Qwen models and Gemini.
 
-`acc_norm` corrects for answer choices that differ in token length and is the
-number that matches published lm-eval baselines.
-
-### Cloud (Gemini) — generative MCQ
-Gemini does not expose per-token log-probs over forced continuations, so it
-is scored generatively: the model is asked to output an answer letter/number and
-that is compared against gold.  **acc and acc_norm are the same value for cloud
-rows** (no length normalisation is possible).  This means local and cloud scores
-are *approximately* but not exactly comparable.
+`acc_norm == acc` for all rows.
 
 ---
 
@@ -58,7 +48,7 @@ python scripts/run_eval.py --validate-only --no-power
 python scripts/run_eval.py --no-cloud
 
 # 5. Full sweep including cloud (asks for confirmation before paid calls)
-python scripts/run_eval.py
+python scripts/run_eval.py --cloud-only --cloud-models gemini-2.5-flash gemini-2.5-pro
 
 # 6. Re-plot from an existing CSV
 python scripts/run_eval.py --plots-only
@@ -87,14 +77,8 @@ Default local models (open, no login required):
 | `Qwen/Qwen2.5-0.5B-Instruct` | 0.5B |
 | `Qwen/Qwen2.5-1.5B-Instruct` | 1.5B |
 | `Qwen/Qwen2.5-3B-Instruct` | 3.0B |
-| `microsoft/Phi-3-mini-4k-instruct` | 3.8B |
-| `Qwen/Qwen2.5-7B-Instruct` | 7.0B |
 
-To add Llama 3.2 or Mistral, pass them via `--models` and run
-`huggingface-cli login` first (license acceptance required).
-
-Cloud: `gemini-2.5-flash` via Vertex AI (`GOOGLE_CLOUD_PROJECT` in `.env`).
-Without credentials the cloud path runs a mock (outputs "A" for every example).
+Cloud: `gemini-2.5-flash` and `gemini-2.5-pro` via Vertex AI (`GOOGLE_CLOUD_PROJECT` in `.env`).
 
 ---
 
@@ -116,7 +100,7 @@ Without credentials the cloud path runs a mock (outputs "A" for every example).
 |---|---|
 | `plot1_accuracy.png` | Accuracy per model grouped by benchmark, with cloud reference lines |
 | `plot2_accuracy_vs_latency.png` | Accuracy vs median latency per query |
-| `plot3_energy.png` | Energy per query by model **(estimated)** |
+| `plot3_co2.png` | CO2 emissions per query by model **(estimated)** |
 | `plot4_accuracy_vs_cost.png` | Accuracy vs cost per 1k queries |
 
 ---
