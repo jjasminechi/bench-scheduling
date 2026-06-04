@@ -188,11 +188,7 @@ class GeminiEvaluator:
         t0 = time.perf_counter()
         try:
             from google.genai import types  # type: ignore
-            # thinking_budget=0 is Flash-only; omit for Pro and other models
-            cfg_kwargs: dict[str, Any] = {"temperature": 0}
-            if "flash" in self.model_tag.lower():
-                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-            cfg = types.GenerateContentConfig(**cfg_kwargs)
+            cfg = types.GenerateContentConfig(temperature=0)
             resp    = self._client.models.generate_content(
                 model=self.model_tag, contents=prompt, config=cfg
             )
