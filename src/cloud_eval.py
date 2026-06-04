@@ -51,8 +51,8 @@ GEMINI_PRICE_INPUT_PER_M  = 0.30   # USD per 1M input tokens  (non-thinking mode
 GEMINI_PRICE_OUTPUT_PER_M = 2.50   # USD per 1M output tokens
 
 # Mapping from (benchmark, gold_int) → expected answer string for parsing
-_GOLD_LETTER = {
-    "hellaswag": {0: "A", 1: "B", 2: "C", 3: "D"},
+_GOLD_DIGIT = {
+    "hellaswag": {0: "1", 1: "2", 2: "3", 3: "4"},
     "piqa":      {0: "1", 1: "2"},
 }
 
@@ -65,25 +65,30 @@ def _build_prompt(benchmark: str, context: str, choices: list[str]) -> str:
     """
     Convert a pre-formatted (context, choices) pair into a generative MCQ prompt.
     """
-    # choices have a leading space (lm-eval style) — strip for display in prompts
-    display = [c.strip() for c in choices]
-
     if benchmark == "piqa":
-        # context = "Question: {goal}\nAnswer:"
         goal = context.removeprefix("Question: ").removesuffix("\nAnswer:").strip()
         lines = [
-            f"Goal: {goal}",
-            f"1: {display[0]}",
-            f"2: {display[1]}",
+            "You are given a goal and two solutions. "
+            "Choose the better solution by selecting 1 or 2. "
+            "Respond only with the number.",
             "",
-            "Which solution is better? Reply with only 1 or 2.",
+            f"Goal: {goal}",
+            f"1. {choices[0]}",
+            f"2. {choices[1]}",
+            "",
+            "Answer: ",
         ]
     else:  # hellaswag
-        # context = "ActivityLabel: partial sentence"
-        lines = [f"Complete the sentence:\n{context}"]
-        for i, c in enumerate(display):
-            lines.append(f"{chr(65+i)}: {c}")
-        lines += ["", "Reply with only the letter of the best ending (A, B, C, or D)."]
+        lines = [
+            "You are given a situation followed by four possible endings. "
+            "Choose the most appropriate ending by selecting the corresponding number. "
+            "Respond only with the number of the correct answer.",
+            "",
+            f"Context: {context}",
+        ]
+        for i, c in enumerate(choices):
+            lines.append(f"{i + 1}. {c}")
+        lines += ["", "Answer: "]
 
     return "\n".join(lines)
 
@@ -92,30 +97,23 @@ def _build_prompt(benchmark: str, context: str, choices: list[str]) -> str:
 # Answer parser  (last-match to avoid matching choice labels)
 # ---------------------------------------------------------------------------
 
-_ABCD_RE = re.compile(r"\b([A-Da-d])\b")
+_1234_RE = re.compile(r"\b([1-4])\b")
 _12_RE   = re.compile(r"\b([12])\b")
 
 
 def _parse_answer(raw: str, benchmark: str) -> str | None:
+    """Return last matching digit — last-match avoids false hits on numbered lists."""
     raw = raw.strip()
-    if benchmark == "piqa":
-        matches = _12_RE.findall(raw)
-        if matches:
-            return matches[-1]
-        matches = _ABCD_RE.findall(raw)
-        if matches:
-            return {"A": "1", "B": "2"}.get(matches[-1].upper())
-        return None
-    else:
-        matches = _ABCD_RE.findall(raw)
-        return matches[-1].upper() if matches else None
+    pattern = _12_RE if benchmark == "piqa" else _1234_RE
+    matches = pattern.findall(raw)
+    return matches[-1] if matches else None
 
 
 def _score(predicted: str | None, gold: int, benchmark: str) -> float:
-    expected = _GOLD_LETTER.get(benchmark, {}).get(gold)
+    expected = _GOLD_DIGIT.get(benchmark, {}).get(gold)
     if predicted is None or expected is None:
         return 0.0
-    return 1.0 if predicted.upper() == expected.upper() else 0.0
+    return 1.0 if predicted == expected else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +188,11 @@ class GeminiEvaluator:
         t0 = time.perf_counter()
         try:
             from google.genai import types  # type: ignore
-            cfg  = types.GenerateContentConfig(
-                temperature=0,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            # thinking_budget=0 is Flash-only; omit for Pro and other models
+            cfg_kwargs: dict[str, Any] = {"temperature": 0}
+            if "flash" in self.model_tag.lower():
+                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            cfg = types.GenerateContentConfig(**cfg_kwargs)
             resp    = self._client.models.generate_content(
                 model=self.model_tag, contents=prompt, config=cfg
             )
@@ -242,21 +241,21 @@ class GeminiEvaluator:
 
 def run_cloud_eval(
     subset: dict[str, list[dict]],
+    model: str | None = None,
     verbose: bool = True,
     max_workers: int = 10,
 ) -> list[dict[str, Any]]:
     """
-    Evaluate the Gemini cloud model on all benchmarks.
+    Evaluate one Gemini cloud model on all benchmarks.
 
-    Returns a list of per-benchmark result dicts (one per benchmark),
-    same shape as local_eval output.
-
-    Will print a cost estimate and ask for confirmation before making real
-    API calls.  Skips the prompt when is_mock=True.
+    Parameters
+    ----------
+    model : Gemini model tag, e.g. "gemini-2.5-pro".
+            Defaults to GEMINI_MODEL env var or "gemini-2.5-flash".
     """
     import numpy as np
 
-    gem = GeminiEvaluator()
+    gem = GeminiEvaluator(model=model)
 
     if verbose:
         print(f"\n{'='*60}")
@@ -282,12 +281,13 @@ def run_cloud_eval(
 
             if verbose:
                 mark = "~" if result["is_mock"] else ("✓" if correct else "✗")
+                err_tag = f"  ERR:{result['error'][:60]}" if result["error"] else ""
                 print(
                     f"    [{i+1:3d}/{len(examples)}] "
                     f"src={ex['source_idx']:5d} "
                     f"gold={ex['gold']} "
                     f"pred={str(predicted):3s} {mark}  "
-                    f"{result['latency_s']:.2f}s  ${cost:.6f}",
+                    f"{result['latency_s']:.2f}s  ${cost:.6f}{err_tag}",
                     flush=True,
                 )
 

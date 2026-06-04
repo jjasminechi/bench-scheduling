@@ -59,8 +59,6 @@ def _confirm_cloud(model_name: str, n_examples: int) -> bool:
     est_cost = input_m * 150 * 0.30 + input_m * 2 * 2.50
     print(f"\n  Cloud model : {model_name}")
     print(f"  Examples    : {n_examples}")
-    print(f"  Cost est.   : ~${est_cost:.3f}  (150 input + 2 output tokens/query)")
-    print("  Note        : actual cost depends on prompt length — verify in GCP console")
     ans = input("  Proceed with cloud inference? [y/N] ").strip().lower()
     return ans in ("y", "yes")
 
@@ -110,8 +108,13 @@ def main() -> None:
         "--models", nargs="+", default=None, metavar="HF_ID",
         help=f"HuggingFace model IDs (default: {' '.join(DEFAULT_MODELS)})",
     )
-    parser.add_argument("--no-cloud",       action="store_true", help="Skip Gemini cloud run")
+    parser.add_argument("--no-cloud",       action="store_true", help="Skip all cloud runs")
     parser.add_argument("--cloud-only",     action="store_true", help="Skip local models")
+    parser.add_argument(
+        "--cloud-models", nargs="+", default=None, metavar="TAG",
+        help="Gemini model tags to run (default: $GEMINI_MODEL). "
+             "Example: --cloud-models gemini-2.5-flash gemini-2.5-pro",
+    )
     parser.add_argument("--no-power",       action="store_true", help="Skip CodeCarbon energy tracking")
     parser.add_argument("--rebuild-subset", action="store_true", help="Force re-download and re-sample")
     parser.add_argument("--validate-only",  action="store_true",
@@ -175,23 +178,28 @@ def main() -> None:
             writer.writerows(rows)
             fh.flush()
 
-        # --- Cloud model ---
+        # --- Cloud models ---
         if not args.no_cloud:
+            import os
             from src.cloud_eval import GeminiEvaluator, run_cloud_eval
 
-            gem = GeminiEvaluator()
-            if gem.is_mock:
-                print(f"\n  Cloud: {gem.name}  (no GOOGLE_CLOUD_PROJECT — running mock)")
-                do_cloud = True
-            else:
-                do_cloud = _confirm_cloud(gem.name, total)
+            default_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+            cloud_tags = args.cloud_models or [default_model]
 
-            if do_cloud:
-                cloud_rows = run_cloud_eval(subset, verbose=verbose)
-                writer.writerows(cloud_rows)
-                fh.flush()
-            else:
-                print("  Skipping cloud inference.")
+            for tag in cloud_tags:
+                gem = GeminiEvaluator(model=tag)
+                if gem.is_mock:
+                    print(f"\n  Cloud: {gem.name}  (no GOOGLE_CLOUD_PROJECT — running mock)")
+                    do_cloud = True
+                else:
+                    do_cloud = _confirm_cloud(gem.name, total)
+
+                if do_cloud:
+                    cloud_rows = run_cloud_eval(subset, model=tag, verbose=verbose)
+                    writer.writerows(cloud_rows)
+                    fh.flush()
+                else:
+                    print(f"  Skipping {tag}.")
 
     finally:
         fh.close()

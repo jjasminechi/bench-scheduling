@@ -114,10 +114,10 @@ Without credentials the cloud path runs a mock (outputs "A" for every example).
 
 | File | Description |
 |---|---|
-| `plot1_acc_vs_size.png` | acc_norm vs parameter count, 95% Wilson CI, per benchmark |
-| `plot2_pareto.png` | acc_norm vs energy/query and vs latency, Pareto frontier |
-| `plot3_co2_crossover.png` | Cumulative CO2 over 1 year at 5/20/50/100 queries/day **(estimated)** |
-| `plot4_cost_accuracy.png` | acc_norm vs $ per 1k queries (local electricity vs cloud API) |
+| `plot1_accuracy.png` | Accuracy per model grouped by benchmark, with cloud reference lines |
+| `plot2_accuracy_vs_latency.png` | Accuracy vs median latency per query |
+| `plot3_energy.png` | Energy per query by model **(estimated)** |
+| `plot4_accuracy_vs_cost.png` | Accuracy vs cost per 1k queries |
 
 ---
 
@@ -154,8 +154,8 @@ One row per `(model, benchmark)`:
 | `benchmark` | hellaswag / piqa |
 | `acc`, `acc_norm`, `acc_stderr` | accuracy metrics (Wilson stderr) |
 | `latency_median_s`, `latency_p90_s` | per-query latency |
-| `energy_kwh_per_query` | **ESTIMATE** (CodeCarbon or EcoLogits) |
-| `emissions_g_per_query` | **ESTIMATE** (CO2 grams) |
+| `energy_kwh_per_query` | (CodeCarbon or EcoLogits) |
+| `emissions_g_per_query` | (CO2 grams) |
 | `energy_method` | "CodeCarbon (est)" / "EcoLogits (est)" / "mock" |
 | `cost_usd_per_query` | local: electricity rate × energy; cloud: exact API cost |
 | `is_mock` | True if Gemini credentials were absent |
